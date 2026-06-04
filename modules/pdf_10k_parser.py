@@ -352,4 +352,12 @@ def parse_10k_pdf(file, company_name: str = "the company") -> dict:
     extracted = extract_financials_with_claude(sections, company_name)
 
     # Step 4: Format for dashboard
-    return format_for_dashboard(extracted)
+    result = format_for_dashboard(extracted)
+
+    # Keep the raw sections for debugging
+    result["_debug_sections"] = {
+        "income_statement_text": sections.get("income_statement", "")[:2000],
+        "balance_sheet_text":    sections.get("balance_sheet", "")[:2000],
+        "total_pages_read":      len(pages),
+    }
+    return result

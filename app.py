@@ -179,11 +179,16 @@ if uploaded_pdf is not None and parse_pdf_button:
         st.sidebar.success("✅ 10-K parsed successfully!")
 
         # Debug panel — shows what Claude extracted
-        with st.expander("🔍 Debug: Raw data extracted from PDF", expanded=False):
+        with st.expander("🔍 Debug: Raw data extracted from PDF", expanded=True):
             if data and "extracted_json" in data:
+                st.markdown("**Claude's extracted numbers:**")
                 st.json(data["extracted_json"])
-            else:
-                st.warning("No extracted_json found in data.")
+            if data and "_debug_sections" in data:
+                st.markdown(f"**Pages read:** {data['_debug_sections']['total_pages_read']}")
+                st.markdown("**Income Statement text sent to Claude:**")
+                st.text(data["_debug_sections"]["income_statement_text"])
+                st.markdown("**Balance Sheet text sent to Claude:**")
+                st.text(data["_debug_sections"]["balance_sheet_text"])
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
         st.error(f"Full error: {e}")
