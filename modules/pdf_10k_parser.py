@@ -40,60 +40,64 @@ def extract_text_from_pdf(file) -> list:
 
 # ── STEP 2: FIND ITEM 8 (FINANCIAL STATEMENTS SECTION) ───────────────────────
 
+def find_toc_page_number(pages: list) -> int:
+    """
+    Reads the Table of Contents to find what PDF page Item 8 starts on.
+    Returns the page number as an integer, or None if not found.
+    """
+    for _, text in pages[:10]:  # TOC is always in first 10 pages
+        # Look for "Item 8" followed by a page number
+        match = re.search(r'Item\s*8[^\d]{1,60}(\d{2,3})', text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def find_financial_text(pages: list) -> str:
     """
     Finds the financial statements section of the 10-K.
-    In every US 10-K, financial statements are in Item 8.
-    Returns a large text block containing the actual financial tables.
+    Strategy:
+    1. Read the TOC to find what page Item 8 starts on
+    2. Jump directly to that page
+    3. If TOC approach fails, scan for pages with actual financial tables
     """
 
-    # First: find the ACTUAL Item 8 page (not the table of contents mention)
-    # Real Item 8 page has the header AND financial numbers, not just page references
-    item8_page_idx = None
+    # Strategy 1: Use TOC to find exact Item 8 page number
+    item8_pdf_page = find_toc_page_number(pages)
+
+    if item8_pdf_page:
+        # Find the page in our extracted pages list that matches this PDF page number
+        start_idx = None
+        for i, (page_num, text) in enumerate(pages):
+            if page_num >= item8_pdf_page:
+                start_idx = i
+                break
+        if start_idx is not None:
+            relevant_pages = pages[start_idx: start_idx + 25]
+            combined = "\n\n".join([text for _, text in relevant_pages])
+            return combined[:12000]
+
+    # Strategy 2: Scan every page for actual financial statement tables
+    # A real financial table page has BOTH a statement keyword AND many numbers
     for i, (page_num, text) in enumerate(pages):
         t = text.upper()
-        # Must contain Item 8 AND financial statement keywords AND actual numbers
-        # The TOC page only has dot leaders (...) and page numbers, not real data
-        has_item8 = bool(re.search(r'ITEM\s*8', t))
-        has_fs_keyword = any(k in t for k in [
-            'CONSOLIDATED STATEMENTS', 'STATEMENTS OF INCOME',
-            'STATEMENTS OF OPERATIONS', 'STATEMENTS OF EARNINGS',
-            'BALANCE SHEET', 'NET REVENUE', 'NET SALES', 'TOTAL REVENUE'
+        has_fs = any(k in t for k in [
+            'CONSOLIDATED STATEMENTS OF INCOME',
+            'CONSOLIDATED STATEMENTS OF OPERATIONS',
+            'CONSOLIDATED STATEMENTS OF EARNINGS',
+            'CONSOLIDATED BALANCE SHEET',
         ])
-        # Count numbers with 3+ digits (real financial data, not page numbers)
-        real_numbers = re.findall(r'\b\d{3,}\b', text)
-        has_real_data = len(real_numbers) >= 5
+        # Real tables have many numbers — count digits groups of 3+ digits
+        numbers = re.findall(r'\b\d{3,}\b', text)
+        if has_fs and len(numbers) >= 8:
+            relevant_pages = pages[i: i + 25]
+            combined = "\n\n".join([text for _, text in relevant_pages])
+            return combined[:12000]
 
-        if has_item8 and has_fs_keyword and has_real_data:
-            item8_page_idx = i
-            break
-
-    # If still not found, look for any page with consolidated financial statements + numbers
-    if item8_page_idx is None:
-        for i, (page_num, text) in enumerate(pages):
-            t = text.upper()
-            has_fs = any(k in t for k in [
-                'CONSOLIDATED STATEMENTS OF INCOME',
-                'CONSOLIDATED STATEMENTS OF OPERATIONS',
-                'CONSOLIDATED STATEMENTS OF EARNINGS',
-            ])
-            real_numbers = re.findall(r'\b\d{3,}\b', text)
-            if has_fs and len(real_numbers) >= 5:
-                item8_page_idx = i
-                break
-
-    if item8_page_idx is not None:
-        # Take everything from Item 8 onwards (up to 30 pages)
-        relevant_pages = pages[item8_page_idx: item8_page_idx + 30]
-    else:
-        # Fallback: take the last 40% of the document
-        start = int(len(pages) * 0.6)
-        relevant_pages = pages[start:]
-
-    # Combine all the relevant text
-    combined = "\n\n--- PAGE BREAK ---\n\n".join([text for _, text in relevant_pages])
-
-    # Return up to 12,000 characters — enough for IS + BS + some notes
+    # Strategy 3: Last resort — take the last 35% of document
+    start = int(len(pages) * 0.65)
+    relevant_pages = pages[start:]
+    combined = "\n\n".join([text for _, text in relevant_pages])
     return combined[:12000]
 
 
