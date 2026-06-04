@@ -184,11 +184,8 @@ if uploaded_pdf is not None and parse_pdf_button:
                 st.markdown("**Claude's extracted numbers:**")
                 st.json(data["extracted_json"])
             if data and "_debug_sections" in data:
-                st.markdown(f"**Pages read:** {data['_debug_sections']['total_pages_read']}")
-                st.markdown("**Income Statement text sent to Claude:**")
-                st.text(data["_debug_sections"]["income_statement_text"])
-                st.markdown("**Balance Sheet text sent to Claude:**")
-                st.text(data["_debug_sections"]["balance_sheet_text"])
+                st.markdown("**Text sent to Claude (first 3000 chars):**")
+                st.text(data["_debug_sections"].get("financial_text_sent", "")[:3000])
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
         st.error(f"Full error: {e}")
