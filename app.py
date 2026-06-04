@@ -77,11 +77,19 @@ with st.sidebar:
             help="Upload a file with sheets: Income Statement, Balance Sheet, Cash Flow, Revenue Schedule, Budget vs Actuals"
         )
         uploaded_pdf = None
+        parse_pdf_button = False
     else:
         uploaded_pdf = st.file_uploader(
             "Upload 10-K PDF",
             type=["pdf"],
             help="Upload a 10-K annual report PDF. Claude will extract the financial data automatically."
+        )
+        parse_pdf_button = st.button(
+            "🔍 Extract Financial Data",
+            type="primary",
+            disabled=uploaded_pdf is None,
+            use_container_width=True,
+            help="Click to start extracting financial data from the PDF"
         )
         uploaded_file = None
 
@@ -120,7 +128,7 @@ with st.sidebar:
 # Decide whether to use uploaded file or sample data
 data = None
 
-if uploaded_pdf is not None:
+if uploaded_pdf is not None and parse_pdf_button:
     try:
         with st.sidebar:
             with st.spinner("Claude is reading your 10-K... (20-40 seconds)"):
@@ -128,6 +136,8 @@ if uploaded_pdf is not None:
         st.sidebar.success("✅ 10-K parsed successfully!")
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
+elif uploaded_pdf is not None and not parse_pdf_button:
+    st.sidebar.info("👆 Click 'Extract Financial Data' to analyse the PDF.")
 
 elif uploaded_file is not None:
     try:
