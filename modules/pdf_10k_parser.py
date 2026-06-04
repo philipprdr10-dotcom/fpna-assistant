@@ -25,28 +25,27 @@ except Exception:
 
 # ── TEXT EXTRACTION ───────────────────────────────────────────────────────────
 
-def extract_text_from_pdf(file) -> str:
+def extract_text_from_pdf(file) -> tuple:
     """
-    Extracts all text from a PDF file.
-    Returns the full text as a single string.
+    Extracts text from a PDF file page by page.
+    Returns (full_text, pages_list) where pages_list is a list of (page_num, text).
     """
-    full_text = []
+    pages = []
     with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages):
             text = page.extract_text()
-            if text:
-                full_text.append(text)
-    return "\n".join(full_text)
+            if text and len(text.strip()) > 50:
+                pages.append((i + 1, text))
+    full_text = "\n".join([t for _, t in pages])
+    return full_text, pages
 
 
-def find_financial_sections(full_text: str) -> dict:
+def find_financial_sections(full_text: str, pages: list) -> dict:
     """
-    Searches the extracted text for the income statement and balance sheet
-    sections by looking for common 10-K section headers.
+    Searches page by page for income statement and balance sheet sections.
     Returns a dict with 'income_statement' and 'balance_sheet' text chunks.
     """
 
-    # Common headers for income statement in 10-Ks
     income_keywords = [
         "CONSOLIDATED STATEMENTS OF OPERATIONS",
         "CONSOLIDATED STATEMENTS OF INCOME",
@@ -54,9 +53,9 @@ def find_financial_sections(full_text: str) -> dict:
         "STATEMENTS OF OPERATIONS",
         "STATEMENTS OF INCOME",
         "INCOME STATEMENT",
+        "RESULTS OF OPERATIONS",
     ]
 
-    # Common headers for balance sheet
     balance_keywords = [
         "CONSOLIDATED BALANCE SHEETS",
         "CONSOLIDATED BALANCE SHEET",
@@ -66,30 +65,45 @@ def find_financial_sections(full_text: str) -> dict:
         "STATEMENTS OF FINANCIAL POSITION",
     ]
 
-    text_upper = full_text.upper()
     sections = {}
 
-    # Find income statement section
-    for kw in income_keywords:
-        idx = text_upper.find(kw)
-        if idx != -1:
-            # Take 3000 characters after the header — enough for the full statement
-            sections["income_statement"] = full_text[idx: idx + 3000]
+    # Search page by page — more accurate than searching the full text
+    for page_num, page_text in pages:
+        page_upper = page_text.upper()
+
+        if "income_statement" not in sections:
+            for kw in income_keywords:
+                if kw in page_upper:
+                    # Grab this page + next page for full statement
+                    idx = pages.index((page_num, page_text))
+                    combined = page_text
+                    if idx + 1 < len(pages):
+                        combined += "\n" + pages[idx + 1][1]
+                    sections["income_statement"] = combined[:5000]
+                    break
+
+        if "balance_sheet" not in sections:
+            for kw in balance_keywords:
+                if kw in page_upper:
+                    idx = pages.index((page_num, page_text))
+                    combined = page_text
+                    if idx + 1 < len(pages):
+                        combined += "\n" + pages[idx + 1][1]
+                    sections["balance_sheet"] = combined[:5000]
+                    break
+
+        if "income_statement" in sections and "balance_sheet" in sections:
             break
 
-    # Find balance sheet section
-    for kw in balance_keywords:
-        idx = text_upper.find(kw)
-        if idx != -1:
-            sections["balance_sheet"] = full_text[idx: idx + 3000]
-            break
-
-    # If we couldn't find specific sections, take the middle chunk of the doc
-    # (financial statements usually appear in the middle of a 10-K)
-    if not sections:
-        mid = len(full_text) // 2
-        sections["income_statement"] = full_text[mid: mid + 4000]
-        sections["balance_sheet"]    = full_text[mid + 2000: mid + 6000]
+    # Fallback: if sections not found by keyword, send a large middle chunk to Claude
+    # and let Claude figure it out
+    if not sections.get("income_statement") or not sections.get("balance_sheet"):
+        # Financial statements are usually in the last 40% of a 10-K
+        all_text = "\n".join([t for _, t in pages])
+        start = int(len(all_text) * 0.5)
+        chunk = all_text[start: start + 8000]
+        sections["income_statement"] = chunk[:4000]
+        sections["balance_sheet"]    = chunk[2000:6000]
 
     return sections
 
@@ -288,12 +302,12 @@ def parse_10k_pdf(file, company_name: str = "the company") -> dict:
     OR raises an exception with an error message.
     """
     # Step 1: Extract text
-    full_text = extract_text_from_pdf(file)
+    full_text, pages = extract_text_from_pdf(file)
     if len(full_text) < 500:
         raise ValueError("Could not extract text from this PDF. It may be a scanned image — try a text-based PDF.")
 
     # Step 2: Find financial statement sections
-    sections = find_financial_sections(full_text)
+    sections = find_financial_sections(full_text, pages)
 
     # Step 3: Claude extracts the numbers
     extracted = extract_financials_with_claude(sections, company_name)
