@@ -47,14 +47,40 @@ def find_financial_text(pages: list) -> str:
     Returns a large text block containing the actual financial tables.
     """
 
-    # First: find the page where Item 8 begins
+    # First: find the ACTUAL Item 8 page (not the table of contents mention)
+    # Real Item 8 page has the header AND financial numbers, not just page references
     item8_page_idx = None
     for i, (page_num, text) in enumerate(pages):
         t = text.upper()
-        # Look for Item 8 header — must mention financial statements
-        if re.search(r'ITEM\s*8[\.\s]', t) and 'FINANCIAL' in t:
+        # Must contain Item 8 AND financial statement keywords AND actual numbers
+        # The TOC page only has dot leaders (...) and page numbers, not real data
+        has_item8 = bool(re.search(r'ITEM\s*8', t))
+        has_fs_keyword = any(k in t for k in [
+            'CONSOLIDATED STATEMENTS', 'STATEMENTS OF INCOME',
+            'STATEMENTS OF OPERATIONS', 'STATEMENTS OF EARNINGS',
+            'BALANCE SHEET', 'NET REVENUE', 'NET SALES', 'TOTAL REVENUE'
+        ])
+        # Count numbers with 3+ digits (real financial data, not page numbers)
+        real_numbers = re.findall(r'\b\d{3,}\b', text)
+        has_real_data = len(real_numbers) >= 5
+
+        if has_item8 and has_fs_keyword and has_real_data:
             item8_page_idx = i
             break
+
+    # If still not found, look for any page with consolidated financial statements + numbers
+    if item8_page_idx is None:
+        for i, (page_num, text) in enumerate(pages):
+            t = text.upper()
+            has_fs = any(k in t for k in [
+                'CONSOLIDATED STATEMENTS OF INCOME',
+                'CONSOLIDATED STATEMENTS OF OPERATIONS',
+                'CONSOLIDATED STATEMENTS OF EARNINGS',
+            ])
+            real_numbers = re.findall(r'\b\d{3,}\b', text)
+            if has_fs and len(real_numbers) >= 5:
+                item8_page_idx = i
+                break
 
     if item8_page_idx is not None:
         # Take everything from Item 8 onwards (up to 30 pages)
