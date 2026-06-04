@@ -40,62 +40,65 @@ def extract_text_from_pdf(file) -> list:
 
 # ── STEP 2: FIND ITEM 8 (FINANCIAL STATEMENTS SECTION) ───────────────────────
 
-def find_toc_page_number(pages: list) -> int:
-    """
-    Reads the Table of Contents to find what PDF page Item 8 starts on.
-    Returns the page number as an integer, or None if not found.
-    """
-    for _, text in pages[:10]:  # TOC is always in first 10 pages
-        # Look for "Item 8" followed by a page number
-        match = re.search(r'Item\s*8[^\d]{1,60}(\d{2,3})', text, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-    return None
-
-
 def find_financial_text(pages: list) -> str:
     """
-    Finds the financial statements section of the 10-K.
-    Strategy:
-    1. Read the TOC to find what page Item 8 starts on
-    2. Jump directly to that page
-    3. If TOC approach fails, scan for pages with actual financial tables
+    Scans every page looking for actual financial statement tables.
+    A real financial statement page has:
+    - Keywords like 'NET SALES', 'TOTAL ASSETS', 'NET INCOME'
+    - AND large numbers formatted like financial data (e.g. 249,636 or 51,827)
+    This avoids MD&A prose which mentions financials but has no tables.
     """
 
-    # Strategy 1: Use TOC to find exact Item 8 page number
-    item8_pdf_page = find_toc_page_number(pages)
+    # Financial table numbers look like: 249,636 or 51,827 or 4,111
+    # These are 4-6 digit numbers with comma separators
+    # MD&A prose has small numbers like 1,220 or 103 — not columns of large ones
+    def count_financial_numbers(text):
+        # Numbers with comma that are 4+ digits total (e.g. 1,234 or 12,345 or 123,456)
+        return len(re.findall(r'\b\d{1,3},\d{3}\b', text))
 
-    if item8_pdf_page:
-        # Find the page in our extracted pages list that matches this PDF page number
-        start_idx = None
-        for i, (page_num, text) in enumerate(pages):
-            if page_num >= item8_pdf_page:
-                start_idx = i
-                break
-        if start_idx is not None:
-            relevant_pages = pages[start_idx: start_idx + 25]
-            combined = "\n\n".join([text for _, text in relevant_pages])
-            return combined[:12000]
+    # Financial statement keywords that appear at the TOP of the actual tables
+    income_markers = [
+        'NET REVENUE', 'NET REVENUES', 'NET SALES', 'TOTAL REVENUE',
+        'TOTAL NET REVENUE', 'MERCHANDISE COSTS', 'COST OF SALES',
+    ]
+    balance_markers = [
+        'TOTAL ASSETS', 'TOTAL LIABILITIES', 'STOCKHOLDERS EQUITY',
+        'SHAREHOLDERS EQUITY', 'TOTAL CURRENT ASSETS',
+    ]
 
-    # Strategy 2: Scan every page for actual financial statement tables
-    # A real financial table page has BOTH a statement keyword AND many numbers
+    best_income_idx  = None
+    best_balance_idx = None
+
     for i, (page_num, text) in enumerate(pages):
         t = text.upper()
-        has_fs = any(k in t for k in [
-            'CONSOLIDATED STATEMENTS OF INCOME',
-            'CONSOLIDATED STATEMENTS OF OPERATIONS',
-            'CONSOLIDATED STATEMENTS OF EARNINGS',
-            'CONSOLIDATED BALANCE SHEET',
-        ])
-        # Real tables have many numbers — count digits groups of 3+ digits
-        numbers = re.findall(r'\b\d{3,}\b', text)
-        if has_fs and len(numbers) >= 8:
-            relevant_pages = pages[i: i + 25]
-            combined = "\n\n".join([text for _, text in relevant_pages])
-            return combined[:12000]
+        fin_numbers = count_financial_numbers(text)
 
-    # Strategy 3: Last resort — take the last 35% of document
-    start = int(len(pages) * 0.65)
+        # Must have at least 6 financial-scale numbers to be a real table
+        if fin_numbers < 6:
+            continue
+
+        if best_income_idx is None:
+            if any(k in t for k in income_markers):
+                best_income_idx = i
+
+        if best_balance_idx is None:
+            if any(k in t for k in balance_markers):
+                best_balance_idx = i
+
+        if best_income_idx is not None and best_balance_idx is not None:
+            break
+
+    # Use the earlier of the two starting points
+    candidates = [x for x in [best_income_idx, best_balance_idx] if x is not None]
+
+    if candidates:
+        start_idx = min(candidates)
+        relevant_pages = pages[start_idx: start_idx + 20]
+        combined = "\n\n".join([text for _, text in relevant_pages])
+        return combined[:12000]
+
+    # Last resort: last 30% of document
+    start = int(len(pages) * 0.7)
     relevant_pages = pages[start:]
     combined = "\n\n".join([text for _, text in relevant_pages])
     return combined[:12000]
