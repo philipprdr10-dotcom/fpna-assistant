@@ -1,9 +1,8 @@
 # pdf_10k_parser.py
-# Parses a real 10-K PDF by:
-# 1. Extracting raw text using pdfplumber
-# 2. Finding the financial statement pages (IS, BS)
-# 3. Sending those sections to Claude to extract structured numbers
-# 4. Returning the same dict format as parser.py so the dashboard works unchanged
+# Smart 10-K PDF parser.
+# Strategy: extract all text from the financial statements section of the PDF,
+# then send it directly to Claude and let Claude find the numbers.
+# Claude is far better at reading messy PDF text than any regex approach.
 
 import pdfplumber
 import anthropic
@@ -14,7 +13,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Also support Streamlit Cloud secrets
 try:
     import streamlit as st
     if hasattr(st, "secrets") and "ANTHROPIC_API_KEY" in st.secrets:
@@ -23,160 +21,88 @@ except Exception:
     pass
 
 
-# ── TEXT EXTRACTION ───────────────────────────────────────────────────────────
+# ── STEP 1: EXTRACT TEXT ──────────────────────────────────────────────────────
 
-def extract_text_from_pdf(file) -> tuple:
+def extract_text_from_pdf(file) -> list:
     """
-    Extracts text from a PDF — smart version that:
-    1. Skips the first 20% of pages (cover, TOC, business description)
-    2. Stops as soon as both financial statements are found
-    3. Never reads more than 80 pages total
-    This keeps processing under 30 seconds for most 10-Ks.
+    Extracts text from every page of the PDF.
+    Returns list of (page_number, text) tuples.
+    Only includes pages with meaningful text (skips blank/image pages).
     """
-    income_keywords = [
-        "STATEMENTS OF OPERATIONS", "STATEMENTS OF INCOME",
-        "STATEMENTS OF EARNINGS", "INCOME STATEMENT",
-    ]
-    balance_keywords = [
-        "BALANCE SHEETS", "BALANCE SHEET",
-        "STATEMENTS OF FINANCIAL POSITION",
-    ]
-
     pages = []
-    found_income  = False
-    found_balance = False
-
     with pdfplumber.open(file) as pdf:
-        total = len(pdf.pages)
-        # Skip first 35% — financial statements are never in the intro/risk factors
-        start_page = max(0, int(total * 0.35))
-        # Read up to 120 pages
-        end_page   = min(total, start_page + 120)
-
-        for i in range(start_page, end_page):
-            text = pdf.pages[i].extract_text()
-            if not text or len(text.strip()) < 50:
-                continue
-
-            pages.append((i + 1, text))
-            text_upper = text.upper()
-
-            if any(kw in text_upper for kw in income_keywords):
-                found_income = True
-            if any(kw in text_upper for kw in balance_keywords):
-                found_balance = True
-
-            # Stop reading once we have both — no need to go further
-            if found_income and found_balance:
-                # Read 4 more pages to capture the full statements
-                for j in range(i + 1, min(i + 5, total)):
-                    extra = pdf.pages[j].extract_text()
-                    if extra:
-                        pages.append((j + 1, extra))
-                break
-
-    full_text = "\n".join([t for _, t in pages])
-    return full_text, pages
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text()
+            if text and len(text.strip()) > 30:
+                pages.append((i + 1, text.strip()))
+    return pages
 
 
-def _page_has_numbers(text: str) -> bool:
+# ── STEP 2: FIND ITEM 8 (FINANCIAL STATEMENTS SECTION) ───────────────────────
+
+def find_financial_text(pages: list) -> str:
     """
-    Returns True if a page looks like a real financial statement
-    (has multiple dollar amounts or number columns).
-    """
-    # A real financial statement page has lots of numbers
-    numbers = re.findall(r'\b\d{1,3}(?:,\d{3})+|\b\d{4,}\b', text)
-    return len(numbers) >= 8
-
-
-def find_financial_sections(full_text: str, pages: list) -> dict:
-    """
-    Searches page by page for income statement and balance sheet sections.
-    IMPORTANT: Only accepts a page as a match if it ALSO contains real numbers
-    (avoids matching the Risk Factors / MD&A sections that mention financials in prose).
+    Finds the financial statements section of the 10-K.
+    In every US 10-K, financial statements are in Item 8.
+    Returns a large text block containing the actual financial tables.
     """
 
-    income_keywords = [
-        "CONSOLIDATED STATEMENTS OF OPERATIONS",
-        "CONSOLIDATED STATEMENTS OF INCOME",
-        "CONSOLIDATED STATEMENTS OF EARNINGS",
-        "STATEMENTS OF OPERATIONS AND COMPREHENSIVE INCOME",
-    ]
-
-    balance_keywords = [
-        "CONSOLIDATED BALANCE SHEETS",
-        "CONSOLIDATED BALANCE SHEET",
-        "CONSOLIDATED STATEMENTS OF FINANCIAL POSITION",
-    ]
-
-    sections = {}
-
-    for i, (page_num, page_text) in enumerate(pages):
-        page_upper = page_text.upper()
-
-        if "income_statement" not in sections:
-            for kw in income_keywords:
-                # Must have the keyword AND real numbers on the same page
-                if kw in page_upper and _page_has_numbers(page_text):
-                    combined = page_text
-                    for j in range(i + 1, min(i + 4, len(pages))):
-                        combined += "\n" + pages[j][1]
-                    sections["income_statement"] = combined[:6000]
-                    break
-
-        if "balance_sheet" not in sections:
-            for kw in balance_keywords:
-                if kw in page_upper and _page_has_numbers(page_text):
-                    combined = page_text
-                    for j in range(i + 1, min(i + 4, len(pages))):
-                        combined += "\n" + pages[j][1]
-                    sections["balance_sheet"] = combined[:6000]
-                    break
-
-        if "income_statement" in sections and "balance_sheet" in sections:
+    # First: find the page where Item 8 begins
+    item8_page_idx = None
+    for i, (page_num, text) in enumerate(pages):
+        t = text.upper()
+        # Look for Item 8 header — must mention financial statements
+        if re.search(r'ITEM\s*8[\.\s]', t) and 'FINANCIAL' in t:
+            item8_page_idx = i
             break
 
-    # Fallback: send the last 30% of the document — financial statements
-    # are always near the end of a 10-K
-    if not sections.get("income_statement") or not sections.get("balance_sheet"):
-        all_text = "\n".join([t for _, t in pages])
-        start = int(len(all_text) * 0.6)
-        chunk = all_text[start:]
-        sections["income_statement"] = chunk[:5000]
-        sections["balance_sheet"]    = chunk[3000:8000]
+    if item8_page_idx is not None:
+        # Take everything from Item 8 onwards (up to 30 pages)
+        relevant_pages = pages[item8_page_idx: item8_page_idx + 30]
+    else:
+        # Fallback: take the last 40% of the document
+        start = int(len(pages) * 0.6)
+        relevant_pages = pages[start:]
 
-    return sections
+    # Combine all the relevant text
+    combined = "\n\n--- PAGE BREAK ---\n\n".join([text for _, text in relevant_pages])
+
+    # Return up to 12,000 characters — enough for IS + BS + some notes
+    return combined[:12000]
 
 
-# ── CLAUDE EXTRACTION ─────────────────────────────────────────────────────────
+# ── STEP 3: CLAUDE EXTRACTS THE NUMBERS ──────────────────────────────────────
 
-def extract_financials_with_claude(sections: dict, company_name: str = "the company") -> dict:
+def extract_with_claude(financial_text: str, company_name: str) -> dict:
     """
-    Sends the financial statement text to Claude and asks it to extract
-    key numbers as structured JSON.
-    Returns a dict in our standard format (same as parser.py output).
+    Sends the financial statement text to Claude.
+    Claude is smart enough to handle messy PDF text, column misalignment,
+    and different number formats (thousands, millions, etc).
+    Returns structured JSON.
     """
 
-    income_text  = sections.get("income_statement", "")
-    balance_text = sections.get("balance_sheet", "")
+    prompt = f"""You are a financial data extraction expert. Below is raw text extracted from a 10-K annual report (SEC filing) for {company_name}.
 
-    prompt = f"""You are a financial data extraction assistant. I will give you raw text extracted from a 10-K annual report for {company_name}.
-
-Your job is to extract the key financial figures and return them as a JSON object.
+The text may be messy due to PDF extraction — columns may be misaligned, numbers may appear on separate lines from their labels. Use your financial expertise to correctly identify and match numbers to their line items.
 
 IMPORTANT RULES:
-- Return ONLY valid JSON, no other text
-- All numbers should be in FULL DOLLARS (if the report says "in millions", multiply by 1,000,000)
-- If a value is not found, use 0
-- Extract the two most recent fiscal years available
-- For the income statement, look for the most recent year and the prior year
-- Use negative numbers for expenses if they appear that way in the source
+1. Return ONLY valid JSON — no explanation, no markdown, no code fences
+2. Convert ALL numbers to FULL DOLLARS:
+   - If the report says "in millions", multiply each number by 1,000,000
+   - If the report says "in thousands", multiply by 1,000
+   - Look for a note near the top of the statements like "(in millions)" or "(dollars in thousands)"
+3. Extract the TWO most recent fiscal years
+4. Use 0 only if you genuinely cannot find the value after careful reading
+5. For EBITDA: if not stated directly, calculate as Operating Income + Depreciation & Amortization
+6. For EBIT: use Operating Income if EBIT is not listed separately
+7. Interest expense should always be a positive number
 
-Return this exact JSON structure:
+Return this exact JSON:
 {{
-  "company_name": "string",
+  "company_name": "{company_name}",
   "latest_year": "FY20XX",
   "prior_year": "FY20XX",
+  "unit": "millions or thousands or dollars",
   "income_statement": {{
     "revenue": 0,
     "revenue_prior": 0,
@@ -206,56 +132,48 @@ Return this exact JSON structure:
   }}
 }}
 
-INCOME STATEMENT TEXT:
-{income_text}
-
-BALANCE SHEET TEXT:
-{balance_text}
-
-Return only the JSON object, nothing else."""
+10-K FINANCIAL STATEMENTS TEXT:
+{financial_text}"""
 
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     message = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=1500,
+        max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
 
     raw = message.content[0].text.strip()
-
-    # Sometimes Claude adds ```json ... ``` fences — strip them
-    raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"^```\s*",     "", raw)
-    raw = re.sub(r"\s*```$",     "", raw)
+    # Strip any accidental markdown fences
+    raw = re.sub(r'^```json\s*', '', raw)
+    raw = re.sub(r'^```\s*',     '', raw)
+    raw = re.sub(r'\s*```$',     '', raw)
 
     return json.loads(raw)
 
 
-# ── DATA FORMATTER ────────────────────────────────────────────────────────────
+# ── STEP 4: FORMAT FOR DASHBOARD ──────────────────────────────────────────────
 
 def format_for_dashboard(extracted: dict) -> dict:
     """
-    Takes the JSON returned by Claude and converts it into the exact
-    dict format that app.py expects (same as parser.py output).
+    Converts Claude's JSON into the dict format app.py expects.
     """
+    import pandas as pd
 
     latest = extracted.get("latest_year", "FY2024")
     prior  = extracted.get("prior_year",  "FY2023")
     inc    = extracted.get("income_statement", {})
     bal    = extracted.get("balance_sheet", {})
 
-    # Derive EBITDA if not provided
-    ebit   = inc.get("ebit", 0)
-    da     = inc.get("depreciation_amortization", 0)
-    ebitda = inc.get("ebitda", 0) or (ebit + da)
+    revenue  = inc.get("revenue", 0)
+    cogs     = inc.get("cost_of_goods_sold", 0)
+    gross_p  = inc.get("gross_profit", 0) or (revenue - cogs if cogs else 0)
+    ebit     = inc.get("ebit", 0)
+    da       = inc.get("depreciation_amortization", 0)
+    ebitda   = inc.get("ebitda", 0) or (ebit + da)
+    interest = abs(inc.get("interest_expense", 0))
+    ni       = inc.get("net_income", 0)
 
-    # Derive gross profit if not provided
-    revenue = inc.get("revenue", 0)
-    cogs    = inc.get("cost_of_goods_sold", 0)
-    gross_p = inc.get("gross_profit", 0) or (revenue - cogs if cogs else 0)
-
-    # Derive equity if not provided
     total_assets = bal.get("total_assets", 0)
     total_liab   = bal.get("total_liabilities", 0)
     equity       = bal.get("shareholders_equity", 0) or (total_assets - total_liab)
@@ -268,8 +186,8 @@ def format_for_dashboard(extracted: dict) -> dict:
         "gross_profit":     gross_p,
         "ebitda":           ebitda,
         "ebit":             ebit,
-        "interest_expense": abs(inc.get("interest_expense", 0)),  # always positive
-        "net_income":       inc.get("net_income", 0),
+        "interest_expense": interest,
+        "net_income":       ni,
         "net_income_prior": inc.get("net_income_prior", 0),
         "da":               da,
         "tax_expense":      inc.get("tax_expense", 0),
@@ -293,72 +211,65 @@ def format_for_dashboard(extracted: dict) -> dict:
         "shareholders_equity_prior": 0,
     }
 
-    # Build minimal income statement DataFrame for trend charts
-    import pandas as pd
     is_rows = [
-        {"Line Item": "Revenue",          latest: revenue,          prior: inc.get("revenue_prior", 0)},
-        {"Line Item": "Cost of Goods Sold", latest: cogs,            prior: 0},
-        {"Line Item": "Gross Profit",     latest: gross_p,          prior: 0},
-        {"Line Item": "EBITDA",           latest: ebitda,           prior: 0},
-        {"Line Item": "EBIT",             latest: ebit,             prior: 0},
-        {"Line Item": "Net Income",       latest: inc.get("net_income", 0), prior: inc.get("net_income_prior", 0)},
-        {"Line Item": "Interest Expense", latest: abs(inc.get("interest_expense", 0)), prior: 0},
-        {"Line Item": "Depreciation & Amortization", latest: da,   prior: 0},
+        {"Line Item": "Revenue",                     latest: revenue,  prior: inc.get("revenue_prior", 0)},
+        {"Line Item": "Cost of Goods Sold",          latest: cogs,     prior: 0},
+        {"Line Item": "Gross Profit",                latest: gross_p,  prior: 0},
+        {"Line Item": "EBITDA",                      latest: ebitda,   prior: 0},
+        {"Line Item": "EBIT",                        latest: ebit,     prior: 0},
+        {"Line Item": "Net Income",                  latest: ni,       prior: inc.get("net_income_prior", 0)},
+        {"Line Item": "Interest Expense",            latest: interest, prior: 0},
+        {"Line Item": "Depreciation & Amortization", latest: da,       prior: 0},
     ]
-    income_df = pd.DataFrame(is_rows)
 
     bs_rows = [
-        {"Line Item": "Cash & Equivalents",         latest: bal.get("cash", 0),                  prior: 0},
-        {"Line Item": "Accounts Receivable",        latest: bal.get("accounts_receivable", 0),   prior: 0},
-        {"Line Item": "Inventory",                  latest: bal.get("inventory", 0),              prior: 0},
-        {"Line Item": "Total Current Assets",       latest: bal.get("total_current_assets", 0),  prior: 0},
-        {"Line Item": "Total Assets",               latest: total_assets,                         prior: 0},
-        {"Line Item": "Accounts Payable",           latest: bal.get("accounts_payable", 0),      prior: 0},
-        {"Line Item": "Short-Term Debt",            latest: bal.get("short_term_debt", 0),        prior: 0},
-        {"Line Item": "Total Current Liabilities",  latest: bal.get("total_current_liabilities", 0), prior: 0},
-        {"Line Item": "Long-Term Debt",             latest: bal.get("long_term_debt", 0),         prior: 0},
-        {"Line Item": "Total Liabilities",          latest: total_liab,                           prior: 0},
-        {"Line Item": "Shareholders Equity",        latest: equity,                               prior: 0},
+        {"Line Item": "Cash & Equivalents",        latest: bal.get("cash", 0),                  prior: 0},
+        {"Line Item": "Accounts Receivable",       latest: bal.get("accounts_receivable", 0),   prior: 0},
+        {"Line Item": "Inventory",                 latest: bal.get("inventory", 0),              prior: 0},
+        {"Line Item": "Total Current Assets",      latest: bal.get("total_current_assets", 0),  prior: 0},
+        {"Line Item": "Total Assets",              latest: total_assets,                         prior: 0},
+        {"Line Item": "Accounts Payable",          latest: bal.get("accounts_payable", 0),      prior: 0},
+        {"Line Item": "Short-Term Debt",           latest: bal.get("short_term_debt", 0),        prior: 0},
+        {"Line Item": "Total Current Liabilities", latest: bal.get("total_current_liabilities", 0), prior: 0},
+        {"Line Item": "Long-Term Debt",            latest: bal.get("long_term_debt", 0),         prior: 0},
+        {"Line Item": "Total Liabilities",         latest: total_liab,                           prior: 0},
+        {"Line Item": "Shareholders Equity",       latest: equity,                               prior: 0},
     ]
-    balance_df = pd.DataFrame(bs_rows)
 
     return {
         "financials":       financials,
         "balance":          balance,
-        "income_statement": income_df,
-        "balance_sheet":    balance_df,
-        "extracted_json":   extracted,   # keep raw for debugging
+        "income_statement": pd.DataFrame(is_rows),
+        "balance_sheet":    pd.DataFrame(bs_rows),
+        "extracted_json":   extracted,
+        "_debug_sections":  {"financial_text_sent": financial_text_cache},
     }
 
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
+financial_text_cache = ""  # Store for debug panel
+
 def parse_10k_pdf(file, company_name: str = "the company") -> dict:
     """
-    Full pipeline: PDF → text → Claude → dashboard-ready dict.
-    Call this from app.py.
-
-    Returns a dict with 'financials', 'balance', 'income_statement', 'balance_sheet'
-    OR raises an exception with an error message.
+    Full pipeline: PDF → text → Claude → dashboard dict.
     """
-    # Step 1: Extract text
-    full_text, pages = extract_text_from_pdf(file)
-    if len(full_text) < 500:
-        raise ValueError("Could not extract text from this PDF. It may be a scanned image — try a text-based PDF.")
+    global financial_text_cache
 
-    # Step 2: Find financial statement sections
-    sections = find_financial_sections(full_text, pages)
+    # Step 1: Extract all text from PDF
+    pages = extract_text_from_pdf(file)
+    if not pages:
+        raise ValueError("No text could be extracted. This PDF may be a scanned image.")
 
-    # Step 3: Claude extracts the numbers
-    extracted = extract_financials_with_claude(sections, company_name)
+    # Step 2: Find the financial statements section
+    financial_text = find_financial_text(pages)
+    financial_text_cache = financial_text
+
+    if len(financial_text) < 200:
+        raise ValueError("Could not find financial statements in this PDF.")
+
+    # Step 3: Claude extracts numbers from the text
+    extracted = extract_with_claude(financial_text, company_name)
 
     # Step 4: Format for dashboard
-    result = format_for_dashboard(extracted)
-
-    # Keep the raw sections for debugging
-    result["_debug_sections"] = {
-        "income_statement_text": sections.get("income_statement", "")[:2000],
-        "balance_sheet_text":    sections.get("balance_sheet", "")[:2000],
-        "total_pages_read":      len(pages),
-    }
-    return result
+    return format_for_dashboard(extracted)
