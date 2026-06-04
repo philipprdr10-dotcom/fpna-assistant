@@ -177,8 +177,16 @@ if uploaded_pdf is not None and parse_pdf_button:
             with st.spinner("Claude is reading your 10-K... (20-40 seconds)"):
                 data = parse_10k_pdf(uploaded_pdf, company_name)
         st.sidebar.success("✅ 10-K parsed successfully!")
+
+        # Debug panel — shows what Claude extracted
+        with st.expander("🔍 Debug: Raw data extracted from PDF", expanded=False):
+            if data and "extracted_json" in data:
+                st.json(data["extracted_json"])
+            else:
+                st.warning("No extracted_json found in data.")
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
+        st.error(f"Full error: {e}")
 elif uploaded_pdf is not None and not parse_pdf_button:
     st.sidebar.info("👆 Click 'Extract Financial Data' to analyse the PDF.")
 
