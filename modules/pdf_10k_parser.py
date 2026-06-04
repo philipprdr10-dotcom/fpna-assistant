@@ -48,10 +48,10 @@ def extract_text_from_pdf(file) -> tuple:
 
     with pdfplumber.open(file) as pdf:
         total = len(pdf.pages)
-        # Skip first 20% — financial statements are never in the intro
-        start_page = max(0, int(total * 0.2))
-        # Never read more than 80 pages
-        end_page   = min(total, start_page + 80)
+        # Skip first 35% — financial statements are never in the intro/risk factors
+        start_page = max(0, int(total * 0.35))
+        # Read up to 120 pages
+        end_page   = min(total, start_page + 120)
 
         for i in range(start_page, end_page):
             text = pdf.pages[i].extract_text()
@@ -79,70 +79,71 @@ def extract_text_from_pdf(file) -> tuple:
     return full_text, pages
 
 
+def _page_has_numbers(text: str) -> bool:
+    """
+    Returns True if a page looks like a real financial statement
+    (has multiple dollar amounts or number columns).
+    """
+    # A real financial statement page has lots of numbers
+    numbers = re.findall(r'\b\d{1,3}(?:,\d{3})+|\b\d{4,}\b', text)
+    return len(numbers) >= 8
+
+
 def find_financial_sections(full_text: str, pages: list) -> dict:
     """
     Searches page by page for income statement and balance sheet sections.
-    Returns a dict with 'income_statement' and 'balance_sheet' text chunks.
+    IMPORTANT: Only accepts a page as a match if it ALSO contains real numbers
+    (avoids matching the Risk Factors / MD&A sections that mention financials in prose).
     """
 
     income_keywords = [
         "CONSOLIDATED STATEMENTS OF OPERATIONS",
         "CONSOLIDATED STATEMENTS OF INCOME",
         "CONSOLIDATED STATEMENTS OF EARNINGS",
-        "STATEMENTS OF OPERATIONS",
-        "STATEMENTS OF INCOME",
-        "INCOME STATEMENT",
-        "RESULTS OF OPERATIONS",
+        "STATEMENTS OF OPERATIONS AND COMPREHENSIVE INCOME",
     ]
 
     balance_keywords = [
         "CONSOLIDATED BALANCE SHEETS",
         "CONSOLIDATED BALANCE SHEET",
-        "BALANCE SHEETS",
-        "BALANCE SHEET",
         "CONSOLIDATED STATEMENTS OF FINANCIAL POSITION",
-        "STATEMENTS OF FINANCIAL POSITION",
     ]
 
     sections = {}
 
-    # Search page by page — more accurate than searching the full text
-    for page_num, page_text in pages:
+    for i, (page_num, page_text) in enumerate(pages):
         page_upper = page_text.upper()
 
         if "income_statement" not in sections:
             for kw in income_keywords:
-                if kw in page_upper:
-                    # Grab this page + next page for full statement
-                    idx = pages.index((page_num, page_text))
+                # Must have the keyword AND real numbers on the same page
+                if kw in page_upper and _page_has_numbers(page_text):
                     combined = page_text
-                    if idx + 1 < len(pages):
-                        combined += "\n" + pages[idx + 1][1]
-                    sections["income_statement"] = combined[:5000]
+                    for j in range(i + 1, min(i + 4, len(pages))):
+                        combined += "\n" + pages[j][1]
+                    sections["income_statement"] = combined[:6000]
                     break
 
         if "balance_sheet" not in sections:
             for kw in balance_keywords:
-                if kw in page_upper:
-                    idx = pages.index((page_num, page_text))
+                if kw in page_upper and _page_has_numbers(page_text):
                     combined = page_text
-                    if idx + 1 < len(pages):
-                        combined += "\n" + pages[idx + 1][1]
-                    sections["balance_sheet"] = combined[:5000]
+                    for j in range(i + 1, min(i + 4, len(pages))):
+                        combined += "\n" + pages[j][1]
+                    sections["balance_sheet"] = combined[:6000]
                     break
 
         if "income_statement" in sections and "balance_sheet" in sections:
             break
 
-    # Fallback: if sections not found by keyword, send a large middle chunk to Claude
-    # and let Claude figure it out
+    # Fallback: send the last 30% of the document — financial statements
+    # are always near the end of a 10-K
     if not sections.get("income_statement") or not sections.get("balance_sheet"):
-        # Financial statements are usually in the last 40% of a 10-K
         all_text = "\n".join([t for _, t in pages])
-        start = int(len(all_text) * 0.5)
-        chunk = all_text[start: start + 8000]
-        sections["income_statement"] = chunk[:4000]
-        sections["balance_sheet"]    = chunk[2000:6000]
+        start = int(len(all_text) * 0.6)
+        chunk = all_text[start:]
+        sections["income_statement"] = chunk[:5000]
+        sections["balance_sheet"]    = chunk[3000:8000]
 
     return sections
 
