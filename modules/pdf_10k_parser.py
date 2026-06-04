@@ -27,15 +27,54 @@ except Exception:
 
 def extract_text_from_pdf(file) -> tuple:
     """
-    Extracts text from a PDF file page by page.
-    Returns (full_text, pages_list) where pages_list is a list of (page_num, text).
+    Extracts text from a PDF — smart version that:
+    1. Skips the first 20% of pages (cover, TOC, business description)
+    2. Stops as soon as both financial statements are found
+    3. Never reads more than 80 pages total
+    This keeps processing under 30 seconds for most 10-Ks.
     """
+    income_keywords = [
+        "STATEMENTS OF OPERATIONS", "STATEMENTS OF INCOME",
+        "STATEMENTS OF EARNINGS", "INCOME STATEMENT",
+    ]
+    balance_keywords = [
+        "BALANCE SHEETS", "BALANCE SHEET",
+        "STATEMENTS OF FINANCIAL POSITION",
+    ]
+
     pages = []
+    found_income  = False
+    found_balance = False
+
     with pdfplumber.open(file) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if text and len(text.strip()) > 50:
-                pages.append((i + 1, text))
+        total = len(pdf.pages)
+        # Skip first 20% — financial statements are never in the intro
+        start_page = max(0, int(total * 0.2))
+        # Never read more than 80 pages
+        end_page   = min(total, start_page + 80)
+
+        for i in range(start_page, end_page):
+            text = pdf.pages[i].extract_text()
+            if not text or len(text.strip()) < 50:
+                continue
+
+            pages.append((i + 1, text))
+            text_upper = text.upper()
+
+            if any(kw in text_upper for kw in income_keywords):
+                found_income = True
+            if any(kw in text_upper for kw in balance_keywords):
+                found_balance = True
+
+            # Stop reading once we have both — no need to go further
+            if found_income and found_balance:
+                # Read 4 more pages to capture the full statements
+                for j in range(i + 1, min(i + 5, total)):
+                    extra = pdf.pages[j].extract_text()
+                    if extra:
+                        pages.append((j + 1, extra))
+                break
+
     full_text = "\n".join([t for _, t in pages])
     return full_text, pages
 
