@@ -21,9 +21,52 @@ from modules.pdf_export import generate_pdf
 st.set_page_config(
     page_title="FP&A Assistant",
     page_icon="📊",
-    layout="wide",           # use full browser width
+    layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ── PASSWORD GATE ─────────────────────────────────────────────────
+# Keeps the app public but protects the API key from random visitors.
+# Password is stored in Streamlit secrets (never in the code).
+
+def check_password():
+    """
+    Shows a password screen. Returns True if correct password entered.
+    Uses st.session_state so the user only has to enter it once per session.
+    """
+    # If already authenticated this session, skip the gate
+    if st.session_state.get("authenticated"):
+        return True
+
+    # Get the correct password from Streamlit secrets or .env
+    correct_password = None
+    try:
+        correct_password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        pass
+    if not correct_password:
+        correct_password = os.getenv("APP_PASSWORD", "fpna2024")  # fallback default
+
+    # Show login screen
+    st.title("📊 FP&A Assistant")
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("### 🔐 Enter Password to Continue")
+        password_input = st.text_input("Password", type="password", placeholder="Enter password...")
+        if st.button("Login", type="primary", use_container_width=True):
+            if password_input == correct_password:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("❌ Incorrect password. Please try again.")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.caption("This tool is password protected to prevent unauthorized API usage.")
+    return False
+
+import os
+if not check_password():
+    st.stop()
 
 # ── CUSTOM CSS ────────────────────────────────────────────────────
 # A little styling to make the dashboard look professional
