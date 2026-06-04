@@ -1,0 +1,16 @@
+# Secret keys — NEVER upload these
+.env
+
+# Virtual environment — too large for GitHub
+venv/
+
+# Mac system files
+.DS_Store
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Streamlit cache
+.streamlit/
