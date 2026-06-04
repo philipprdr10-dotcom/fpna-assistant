@@ -9,6 +9,7 @@ import plotly.express as px
 import pandas as pd
 from modules.parser import parse_excel
 from modules.flexible_parser import parse_flexible_excel
+from modules.pdf_10k_parser import parse_10k_pdf
 from modules.ratios import calculate_all_ratios, calculate_ratio_trends
 from modules.revenue_schedule import analyze_revenue_schedule, build_forecast
 from modules.budget_vs_actuals import analyze_budget_vs_actuals
@@ -62,14 +63,30 @@ with st.sidebar:
 
     # File uploader
     st.markdown("### Upload Financial Data")
-    uploaded_file = st.file_uploader(
-        "Upload Excel file (.xlsx)",
-        type=["xlsx"],
-        help="Upload a file with sheets: Income Statement, Balance Sheet, Cash Flow, Revenue Schedule, Budget vs Actuals"
+
+    upload_type = st.radio(
+        "File type",
+        ["Excel (.xlsx)", "10-K PDF"],
+        help="Upload an Excel file using our template, or upload a 10-K PDF directly"
     )
 
+    if upload_type == "Excel (.xlsx)":
+        uploaded_file = st.file_uploader(
+            "Upload Excel file (.xlsx)",
+            type=["xlsx"],
+            help="Upload a file with sheets: Income Statement, Balance Sheet, Cash Flow, Revenue Schedule, Budget vs Actuals"
+        )
+        uploaded_pdf = None
+    else:
+        uploaded_pdf = st.file_uploader(
+            "Upload 10-K PDF",
+            type=["pdf"],
+            help="Upload a 10-K annual report PDF. Claude will extract the financial data automatically."
+        )
+        uploaded_file = None
+
     # Option to use sample data
-    use_sample = st.checkbox("Use sample data", value=True)
+    use_sample = st.checkbox("Use sample data", value=True if (not uploaded_file and not uploaded_pdf) else False)
 
     st.markdown("---")
     st.markdown("### Compare a Second Company")
@@ -103,7 +120,16 @@ with st.sidebar:
 # Decide whether to use uploaded file or sample data
 data = None
 
-if uploaded_file is not None:
+if uploaded_pdf is not None:
+    try:
+        with st.sidebar:
+            with st.spinner("Claude is reading your 10-K... (20-40 seconds)"):
+                data = parse_10k_pdf(uploaded_pdf, company_name)
+        st.sidebar.success("✅ 10-K parsed successfully!")
+    except Exception as e:
+        st.sidebar.error(f"❌ Error parsing PDF: {e}")
+
+elif uploaded_file is not None:
     try:
         data = parse_excel(uploaded_file)
         st.sidebar.success("✅ File uploaded successfully!")

@@ -6,8 +6,16 @@ import anthropic
 import os
 from dotenv import load_dotenv
 
-# Load the API key from the .env file
+# Load the API key from the .env file (local development)
 load_dotenv()
+
+# Also support Streamlit Cloud secrets (deployment)
+try:
+    import streamlit as st
+    if hasattr(st, "secrets") and "ANTHROPIC_API_KEY" in st.secrets:
+        os.environ["ANTHROPIC_API_KEY"] = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:
+    pass
 
 def generate_narrative(
     financials: dict,
