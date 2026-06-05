@@ -167,7 +167,6 @@ with st.sidebar:
     )
 
     if upload_type == "Excel (.xlsx)":
-        clear_pdf_state()  # Clear any old PDF data when switching to Excel
         uploaded_file = st.file_uploader(
             "Upload Excel file (.xlsx)",
             type=["xlsx"],
@@ -440,15 +439,20 @@ with tab1:
                 )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    # Revenue trend chart — only show if we have at least 2 years of data
+    # Revenue trend chart
     st.markdown("#### Revenue & Net Income Trend")
     if "income_statement" in data:
         df = data["income_statement"]
         year_cols = [c for c in df.columns if str(c).startswith("FY")]
-        # Only show years with actual revenue data
-        year_cols = [y for y in year_cols if df[df["Line Item"] == "Revenue"][y].values[0] != 0] if not df[df["Line Item"] == "Revenue"].empty else []
         rev_row = df[df["Line Item"] == "Revenue"]
         ni_row  = df[df["Line Item"] == "Net Income"]
+
+        # Filter to years with actual revenue data
+        try:
+            if not rev_row.empty:
+                year_cols = [y for y in year_cols if y in rev_row.columns and rev_row[y].values[0] != 0]
+        except Exception:
+            pass
 
         if not rev_row.empty and not ni_row.empty and len(year_cols) >= 1:
             fig = go.Figure()
