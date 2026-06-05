@@ -98,9 +98,13 @@ with st.sidebar:
     st.markdown("---")
 
     # Company name input
+    # Set default company name — overwritten by auto-detection after PDF extract
+    if "company_name_input" not in st.session_state:
+        st.session_state["company_name_input"] = "Acme Corp"
+
     company_name = st.text_input(
         "Company Name",
-        value=st.session_state.get("detected_company", "Acme Corp"),
+        key="company_name_input",
         help="Enter the company name for the AI narrative"
     )
 
@@ -182,6 +186,7 @@ if uploaded_pdf is not None and parse_pdf_button:
 
         if parsed.get("_detected_company_name"):
             st.session_state["detected_company"] = parsed["_detected_company_name"]
+            st.session_state["company_name_input"] = parsed["_detected_company_name"]
 
         if parsed.get("_validation_warning"):
             st.sidebar.warning(f"⚠️ {parsed['_validation_warning']}")
