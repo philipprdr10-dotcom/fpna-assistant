@@ -175,22 +175,29 @@ if uploaded_pdf is not None and parse_pdf_button:
     try:
         with st.sidebar:
             with st.spinner("Claude is reading your 10-K... (20-40 seconds)"):
-                data = parse_10k_pdf(uploaded_pdf, company_name)
-        if data.get("_validation_warning"):
-            st.sidebar.warning(f"⚠️ {data['_validation_warning']}")
+                parsed = parse_10k_pdf(uploaded_pdf, company_name)
+
+        # Store in session state so it survives the rerun
+        st.session_state["pdf_data"] = parsed
+
+        if parsed.get("_detected_company_name"):
+            st.session_state["detected_company"] = parsed["_detected_company_name"]
+
+        if parsed.get("_validation_warning"):
+            st.sidebar.warning(f"⚠️ {parsed['_validation_warning']}")
         else:
             st.sidebar.success("✅ 10-K parsed successfully!")
 
-        # Auto-fill company name if detected
-        if data.get("_detected_company_name"):
-            st.session_state["detected_company"] = data["_detected_company_name"]
-            st.rerun()
+        st.rerun()
 
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
-        st.error(f"Full error: {e}")
 elif uploaded_pdf is not None and not parse_pdf_button:
-    st.sidebar.info("👆 Click 'Extract Financial Data' to analyse the PDF.")
+    # Show previously parsed data if available
+    if st.session_state.get("pdf_data"):
+        data = st.session_state["pdf_data"]
+    else:
+        st.sidebar.info("👆 Click 'Extract Financial Data' to analyse the PDF.")
 
 elif uploaded_file is not None:
     try:
