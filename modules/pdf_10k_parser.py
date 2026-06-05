@@ -1,8 +1,7 @@
 # pdf_10k_parser.py
-# Smart 10-K PDF parser.
-# Strategy: extract all text from the financial statements section of the PDF,
-# then send it directly to Claude and let Claude find the numbers.
-# Claude is far better at reading messy PDF text than any regex approach.
+# Extracts financial data from 10-K PDFs using two approaches:
+# 1. pdfplumber table extraction (finds actual table structures)
+# 2. Falls back to text extraction + Claude if tables not found
 
 import pdfplumber
 import anthropic
@@ -21,14 +20,24 @@ except Exception:
     pass
 
 
-# ── STEP 1: EXTRACT TEXT ──────────────────────────────────────────────────────
+# ── FINANCIAL STATEMENT KEYWORDS ─────────────────────────────────────────────
 
-def extract_text_from_pdf(file) -> list:
-    """
-    Extracts text from every page of the PDF.
-    Returns list of (page_number, text) tuples.
-    Only includes pages with meaningful text (skips blank/image pages).
-    """
+INCOME_MARKERS = [
+    'net revenue', 'net revenues', 'net sales', 'total revenue',
+    'total revenues', 'merchandise costs', 'cost of sales',
+    'selling, general', 'operating income', 'net income',
+]
+
+BALANCE_MARKERS = [
+    'total assets', 'total liabilities', 'stockholders', 'shareholders',
+    'total current assets', 'total current liabilities', 'cash and cash',
+]
+
+
+# ── STEP 1: EXTRACT TEXT FROM ALL PAGES ──────────────────────────────────────
+
+def extract_all_pages(file) -> list:
+    """Extract (page_num, text) for every page in the PDF."""
     pages = []
     with pdfplumber.open(file) as pdf:
         for i, page in enumerate(pdf.pages):
@@ -38,104 +47,96 @@ def extract_text_from_pdf(file) -> list:
     return pages
 
 
-# ── STEP 2: FIND ITEM 8 (FINANCIAL STATEMENTS SECTION) ───────────────────────
+# ── STEP 2: FIND FINANCIAL STATEMENT PAGES ───────────────────────────────────
 
-def find_financial_text(pages: list) -> str:
+def is_financial_statement_page(text: str) -> bool:
     """
-    Scans every page looking for actual financial statement tables.
-    A real financial statement page has:
-    - Keywords like 'NET SALES', 'TOTAL ASSETS', 'NET INCOME'
-    - AND large numbers formatted like financial data (e.g. 249,636 or 51,827)
-    This avoids MD&A prose which mentions financials but has no tables.
+    Returns True if this page looks like an actual financial statement table.
+    Requirements:
+    - Contains financial statement keywords
+    - Has multiple large numbers (millions range: X,XXX or XX,XXX or XXX,XXX)
+    - NOT just prose text mentioning financials
     """
+    t = text.lower()
 
-    # Financial table numbers look like: 249,636 or 51,827 or 4,111
-    # These are 4-6 digit numbers with comma separators
-    # MD&A prose has small numbers like 1,220 or 103 — not columns of large ones
-    def count_financial_numbers(text):
-        # Numbers with comma that are 4+ digits total (e.g. 1,234 or 12,345 or 123,456)
-        return len(re.findall(r'\b\d{1,3},\d{3}\b', text))
+    # Check for financial keywords
+    has_income_kw  = sum(1 for k in INCOME_MARKERS  if k in t) >= 2
+    has_balance_kw = sum(1 for k in BALANCE_MARKERS if k in t) >= 2
 
-    # Financial statement keywords that appear at the TOP of the actual tables
-    income_markers = [
-        'NET REVENUE', 'NET REVENUES', 'NET SALES', 'TOTAL REVENUE',
-        'TOTAL NET REVENUE', 'MERCHANDISE COSTS', 'COST OF SALES',
-    ]
-    balance_markers = [
-        'TOTAL ASSETS', 'TOTAL LIABILITIES', 'STOCKHOLDERS EQUITY',
-        'SHAREHOLDERS EQUITY', 'TOTAL CURRENT ASSETS',
-    ]
+    if not (has_income_kw or has_balance_kw):
+        return False
 
-    best_income_idx  = None
-    best_balance_idx = None
+    # Count numbers that look like financial statement data
+    # Pattern: number with comma separator (1,234 or 12,345 or 123,456 or 1,234,567)
+    fin_numbers = re.findall(r'\b\d{1,3}(?:,\d{3})+\b', text)
 
+    # Must have at least 8 such numbers to be a real financial table
+    return len(fin_numbers) >= 8
+
+
+def find_financial_pages(pages: list) -> list:
+    """
+    Returns the subset of pages that contain actual financial statements.
+    Searches the entire document, returns up to 20 consecutive pages
+    starting from the first financial statement page found.
+    """
     for i, (page_num, text) in enumerate(pages):
-        t = text.upper()
-        fin_numbers = count_financial_numbers(text)
+        if is_financial_statement_page(text):
+            # Found the start — grab this page + next 19
+            return pages[i: i + 20]
 
-        # Must have at least 6 financial-scale numbers to be a real table
-        if fin_numbers < 6:
-            continue
-
-        if best_income_idx is None:
-            if any(k in t for k in income_markers):
-                best_income_idx = i
-
-        if best_balance_idx is None:
-            if any(k in t for k in balance_markers):
-                best_balance_idx = i
-
-        if best_income_idx is not None and best_balance_idx is not None:
-            break
-
-    # Use the earlier of the two starting points
-    candidates = [x for x in [best_income_idx, best_balance_idx] if x is not None]
-
-    if candidates:
-        start_idx = min(candidates)
-        relevant_pages = pages[start_idx: start_idx + 20]
-        combined = "\n\n".join([text for _, text in relevant_pages])
-        return combined[:12000]
-
-    # Last resort: last 30% of document
-    start = int(len(pages) * 0.7)
-    relevant_pages = pages[start:]
-    combined = "\n\n".join([text for _, text in relevant_pages])
-    return combined[:12000]
+    return []
 
 
-# ── STEP 3: CLAUDE EXTRACTS THE NUMBERS ──────────────────────────────────────
+# ── STEP 3: BUILD TEXT BLOCK FOR CLAUDE ──────────────────────────────────────
+
+def build_financial_text(pages: list, all_pages: list) -> str:
+    """
+    Combines the financial statement pages into one text block.
+    If no financial pages found, falls back to second half of document.
+    """
+    if pages:
+        combined = "\n\n".join([text for _, text in pages])
+        return combined[:14000]
+
+    # Fallback: second half of the document
+    mid = len(all_pages) // 2
+    combined = "\n\n".join([text for _, text in all_pages[mid:]])
+    return combined[:14000]
+
+
+# ── STEP 4: CLAUDE EXTRACTS NUMBERS ──────────────────────────────────────────
 
 def extract_with_claude(financial_text: str, company_name: str) -> dict:
     """
-    Sends the financial statement text to Claude.
-    Claude is smart enough to handle messy PDF text, column misalignment,
-    and different number formats (thousands, millions, etc).
-    Returns structured JSON.
+    Sends financial statement text to Claude for structured extraction.
     """
 
-    prompt = f"""You are a financial data extraction expert. Below is raw text extracted from a 10-K annual report (SEC filing) for {company_name}.
+    prompt = f"""You are a financial data extraction expert analyzing a 10-K annual report for {company_name}.
 
-The text may be messy due to PDF extraction — columns may be misaligned, numbers may appear on separate lines from their labels. Use your financial expertise to correctly identify and match numbers to their line items.
+The text below is extracted from the financial statements section of the 10-K.
+The text may be messy due to PDF extraction — numbers and labels may be on separate lines.
 
-IMPORTANT RULES:
-1. Return ONLY valid JSON — no explanation, no markdown, no code fences
+CRITICAL INSTRUCTIONS:
+1. Return ONLY valid JSON — no explanation, no markdown fences
 2. Convert ALL numbers to FULL DOLLARS:
-   - If the report says "in millions", multiply each number by 1,000,000
-   - If the report says "in thousands", multiply by 1,000
-   - Look for a note near the top of the statements like "(in millions)" or "(dollars in thousands)"
+   - If you see "(amounts in millions)" → multiply each number by 1,000,000
+   - If you see "(in thousands)" → multiply by 1,000
+   - Look carefully for the unit disclosure near the top of the statements
 3. Extract the TWO most recent fiscal years
-4. Use 0 only if you genuinely cannot find the value after careful reading
-5. For EBITDA: if not stated directly, calculate as Operating Income + Depreciation & Amortization
-6. For EBIT: use Operating Income if EBIT is not listed separately
-7. Interest expense should always be a positive number
+4. For missing values, derive them:
+   - Gross Profit = Revenue - Cost of Goods Sold
+   - EBIT = Operating Income (if EBIT not listed)
+   - EBITDA = EBIT + Depreciation & Amortization
+5. Interest expense must be positive
+6. If you truly cannot find a value after careful reading, use 0
 
-Return this exact JSON:
+JSON format to return:
 {{
   "company_name": "{company_name}",
   "latest_year": "FY20XX",
   "prior_year": "FY20XX",
-  "unit": "millions or thousands or dollars",
+  "unit": "millions/thousands/dollars",
   "income_statement": {{
     "revenue": 0,
     "revenue_prior": 0,
@@ -165,11 +166,10 @@ Return this exact JSON:
   }}
 }}
 
-10-K FINANCIAL STATEMENTS TEXT:
+FINANCIAL STATEMENTS TEXT:
 {financial_text}"""
 
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
     message = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=2000,
@@ -177,7 +177,6 @@ Return this exact JSON:
     )
 
     raw = message.content[0].text.strip()
-    # Strip any accidental markdown fences
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*',     '', raw)
     raw = re.sub(r'\s*```$',     '', raw)
@@ -185,12 +184,9 @@ Return this exact JSON:
     return json.loads(raw)
 
 
-# ── STEP 4: FORMAT FOR DASHBOARD ──────────────────────────────────────────────
+# ── STEP 5: FORMAT FOR DASHBOARD ─────────────────────────────────────────────
 
-def format_for_dashboard(extracted: dict) -> dict:
-    """
-    Converts Claude's JSON into the dict format app.py expects.
-    """
+def format_for_dashboard(extracted: dict, financial_text: str) -> dict:
     import pandas as pd
 
     latest = extracted.get("latest_year", "FY2024")
@@ -256,17 +252,17 @@ def format_for_dashboard(extracted: dict) -> dict:
     ]
 
     bs_rows = [
-        {"Line Item": "Cash & Equivalents",        latest: bal.get("cash", 0),                  prior: 0},
-        {"Line Item": "Accounts Receivable",       latest: bal.get("accounts_receivable", 0),   prior: 0},
-        {"Line Item": "Inventory",                 latest: bal.get("inventory", 0),              prior: 0},
-        {"Line Item": "Total Current Assets",      latest: bal.get("total_current_assets", 0),  prior: 0},
-        {"Line Item": "Total Assets",              latest: total_assets,                         prior: 0},
-        {"Line Item": "Accounts Payable",          latest: bal.get("accounts_payable", 0),      prior: 0},
-        {"Line Item": "Short-Term Debt",           latest: bal.get("short_term_debt", 0),        prior: 0},
+        {"Line Item": "Cash & Equivalents",        latest: bal.get("cash", 0),                   prior: 0},
+        {"Line Item": "Accounts Receivable",       latest: bal.get("accounts_receivable", 0),    prior: 0},
+        {"Line Item": "Inventory",                 latest: bal.get("inventory", 0),               prior: 0},
+        {"Line Item": "Total Current Assets",      latest: bal.get("total_current_assets", 0),   prior: 0},
+        {"Line Item": "Total Assets",              latest: total_assets,                          prior: 0},
+        {"Line Item": "Accounts Payable",          latest: bal.get("accounts_payable", 0),       prior: 0},
+        {"Line Item": "Short-Term Debt",           latest: bal.get("short_term_debt", 0),         prior: 0},
         {"Line Item": "Total Current Liabilities", latest: bal.get("total_current_liabilities", 0), prior: 0},
-        {"Line Item": "Long-Term Debt",            latest: bal.get("long_term_debt", 0),         prior: 0},
-        {"Line Item": "Total Liabilities",         latest: total_liab,                           prior: 0},
-        {"Line Item": "Shareholders Equity",       latest: equity,                               prior: 0},
+        {"Line Item": "Long-Term Debt",            latest: bal.get("long_term_debt", 0),          prior: 0},
+        {"Line Item": "Total Liabilities",         latest: total_liab,                            prior: 0},
+        {"Line Item": "Shareholders Equity",       latest: equity,                                prior: 0},
     ]
 
     return {
@@ -275,34 +271,31 @@ def format_for_dashboard(extracted: dict) -> dict:
         "income_statement": pd.DataFrame(is_rows),
         "balance_sheet":    pd.DataFrame(bs_rows),
         "extracted_json":   extracted,
-        "_debug_sections":  {"financial_text_sent": financial_text_cache},
+        "_debug_sections":  {"financial_text_sent": financial_text},
     }
 
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
-financial_text_cache = ""  # Store for debug panel
-
 def parse_10k_pdf(file, company_name: str = "the company") -> dict:
-    """
-    Full pipeline: PDF → text → Claude → dashboard dict.
-    """
-    global financial_text_cache
+    """Full pipeline: PDF → financial pages → Claude → dashboard dict."""
 
-    # Step 1: Extract all text from PDF
-    pages = extract_text_from_pdf(file)
-    if not pages:
+    # Step 1: Extract all pages
+    all_pages = extract_all_pages(file)
+    if not all_pages:
         raise ValueError("No text could be extracted. This PDF may be a scanned image.")
 
-    # Step 2: Find the financial statements section
-    financial_text = find_financial_text(pages)
-    financial_text_cache = financial_text
+    # Step 2: Find financial statement pages
+    fin_pages = find_financial_pages(all_pages)
 
-    if len(financial_text) < 200:
+    # Step 3: Build text block
+    financial_text = build_financial_text(fin_pages, all_pages)
+
+    if len(financial_text) < 100:
         raise ValueError("Could not find financial statements in this PDF.")
 
-    # Step 3: Claude extracts numbers from the text
+    # Step 4: Claude extracts the numbers
     extracted = extract_with_claude(financial_text, company_name)
 
-    # Step 4: Format for dashboard
-    return format_for_dashboard(extracted)
+    # Step 5: Format for dashboard
+    return format_for_dashboard(extracted, financial_text)
