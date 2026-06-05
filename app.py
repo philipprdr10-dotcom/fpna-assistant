@@ -247,6 +247,22 @@ bva_data   = analyze_budget_vs_actuals(data.get("budget_vs_actuals"))
 
 latest_year = financials.get("latest_year", "FY2024")
 
+# ── SMART NUMBER FORMATTER ────────────────────────────────────────
+# Automatically picks B, M, or K depending on the size of the number
+def fmt_value(val):
+    """Format a dollar value smartly: B for billions, M for millions, K for thousands."""
+    if val is None:
+        return "$0"
+    abs_val = abs(val)
+    if abs_val >= 1e9:
+        return f"${val/1e9:.2f}B"
+    elif abs_val >= 1e6:
+        return f"${val/1e6:.1f}M"
+    elif abs_val >= 1e3:
+        return f"${val/1e3:.1f}K"
+    else:
+        return f"${val:,.0f}"
+
 # ── HEADER ────────────────────────────────────────────────────────
 st.title(f"📊 {company_name} — FP&A Dashboard")
 st.caption(f"Financial analysis for {latest_year} | Powered by Claude AI")
@@ -278,7 +294,7 @@ with tab1:
         rev_growth = ((rev - rev_prior) / rev_prior * 100) if rev_prior else 0
         st.metric(
             label="Revenue",
-            value=f"${rev/1e6:.1f}M",
+            value=fmt_value(rev),
             delta=f"{rev_growth:+.1f}% YoY"
         )
 
@@ -287,7 +303,7 @@ with tab1:
         ebitda_margin = (ebitda / rev * 100) if rev else 0
         st.metric(
             label="EBITDA",
-            value=f"${ebitda/1e6:.1f}M",
+            value=fmt_value(ebitda),
             delta=f"{ebitda_margin:.1f}% margin"
         )
 
@@ -297,7 +313,7 @@ with tab1:
         ni_growth = ((ni - ni_prior) / ni_prior * 100) if ni_prior else 0
         st.metric(
             label="Net Income",
-            value=f"${ni/1e6:.2f}M",
+            value=fmt_value(ni),
             delta=f"{ni_growth:+.1f}% YoY"
         )
 
@@ -305,7 +321,7 @@ with tab1:
         cash = balance.get("cash", 0)
         st.metric(
             label="Cash",
-            value=f"${cash/1e6:.1f}M",
+            value=fmt_value(cash),
             delta="Net cash position" if balance.get("long_term_debt", 0) < cash else "Net debt"
         )
 
@@ -320,10 +336,9 @@ with tab1:
             df = data["income_statement"]
             year_cols = [c for c in df.columns if str(c).startswith("FY")]
             display_df = df[["Line Item"] + year_cols].copy()
-            # Format numbers as $M
             for col in year_cols:
                 display_df[col] = display_df[col].apply(
-                    lambda x: f"${x/1e6:.2f}M" if pd.notna(x) else "-"
+                    lambda x: fmt_value(x) if pd.notna(x) and x != 0 else "-"
                 )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -335,7 +350,7 @@ with tab1:
             display_df = df[["Line Item"] + year_cols].copy()
             for col in year_cols:
                 display_df[col] = display_df[col].apply(
-                    lambda x: f"${x/1e6:.2f}M" if pd.notna(x) else "-"
+                    lambda x: fmt_value(x) if pd.notna(x) and x != 0 else "-"
                 )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
