@@ -36,6 +36,34 @@ BALANCE_MARKERS = [
 
 # ── STEP 1: EXTRACT TEXT FROM ALL PAGES ──────────────────────────────────────
 
+def detect_company_name(pages: list) -> str:
+    """
+    Reads the first 3 pages of the 10-K to find the company name.
+    Looks for common patterns like 'FORM 10-K' followed by company name,
+    or the company name in the document header.
+    Returns the detected name or empty string if not found.
+    """
+    for _, text in pages[:3]:
+        # Pattern 1: "for [Company Name]" near Form 10-K
+        match = re.search(
+            r'(?:ANNUAL REPORT|FORM 10-K)[^\n]*\n+([A-Z][A-Za-z\s\.,&]+(?:Inc|Corp|LLC|Ltd|Co|Corporation|Company|Group|Holdings)[A-Za-z\s\.,]*)',
+            text, re.IGNORECASE
+        )
+        if match:
+            return match.group(1).strip()
+
+        # Pattern 2: Company name appears in all-caps on its own line near top
+        lines = text.strip().split('\n')
+        for i, line in enumerate(lines[:15]):
+            line = line.strip()
+            if (len(line) > 5 and
+                any(k in line for k in ['Inc.', 'Corp.', 'Corporation', 'Company', 'LLC', 'Ltd.', 'Group', 'Holdings']) and
+                not any(k in line.upper() for k in ['FORM', 'ANNUAL', 'REPORT', 'SECURITIES', 'EXCHANGE'])):
+                return line
+
+    return ""
+
+
 def extract_all_pages(file) -> list:
     """
     Extract (page_num, text) for every page in the PDF.
@@ -388,6 +416,11 @@ def parse_10k_pdf(file, company_name: str = "the company") -> dict:
     # Step 1: Extract all pages
     all_pages = extract_all_pages(file)
 
+    # Auto-detect company name if not provided
+    detected_name = detect_company_name(all_pages)
+    if detected_name:
+        company_name = detected_name
+
     # Step 2: Find financial statement pages
     fin_pages = find_financial_pages(all_pages)
 
@@ -422,6 +455,9 @@ def parse_10k_pdf(file, company_name: str = "the company") -> dict:
 
     # Step 6: Format for dashboard
     result = format_for_dashboard(extracted, financial_text)
+
+    # Pass detected company name back to app
+    result["_detected_company_name"] = company_name
 
     # Add validation warning if still failing
     if not is_valid:

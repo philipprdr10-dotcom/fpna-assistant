@@ -100,7 +100,7 @@ with st.sidebar:
     # Company name input
     company_name = st.text_input(
         "Company Name",
-        value="Acme Corp",
+        value=st.session_state.get("detected_company", "Acme Corp"),
         help="Enter the company name for the AI narrative"
     )
 
@@ -180,6 +180,11 @@ if uploaded_pdf is not None and parse_pdf_button:
             st.sidebar.warning(f"⚠️ {data['_validation_warning']}")
         else:
             st.sidebar.success("✅ 10-K parsed successfully!")
+
+        # Auto-fill company name if detected
+        if data.get("_detected_company_name"):
+            st.session_state["detected_company"] = data["_detected_company_name"]
+            st.rerun()
 
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
