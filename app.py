@@ -7,6 +7,8 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+import traceback
+
 from modules.parser import parse_excel
 from modules.flexible_parser import parse_flexible_excel
 from modules.pdf_10k_parser import parse_10k_pdf
@@ -15,6 +17,53 @@ from modules.revenue_schedule import analyze_revenue_schedule, build_forecast
 from modules.budget_vs_actuals import analyze_budget_vs_actuals
 from modules.ai_narrative import generate_narrative
 from modules.pdf_export import generate_pdf
+
+
+# ── GLOBAL SAFETY HELPERS ─────────────────────────────────────────────────────
+
+def safe_get(d: dict, *keys, default=0):
+    """
+    Safely get a nested value from a dict.
+    Returns default if any key is missing or value is None.
+    Example: safe_get(data, "financials", "revenue")
+    """
+    try:
+        for key in keys:
+            d = d[key]
+        return d if d is not None else default
+    except (KeyError, TypeError):
+        return default
+
+
+def safe_divide(a, b, default=0):
+    """Division that never crashes — returns default if b is 0 or None."""
+    try:
+        if not b:
+            return default
+        return a / b
+    except (TypeError, ZeroDivisionError):
+        return default
+
+
+def safe_dataframe(data: dict, key: str) -> pd.DataFrame:
+    """
+    Returns a DataFrame from data[key], or an empty DataFrame if missing/corrupt.
+    Prevents crashes when a module returns incomplete data.
+    """
+    try:
+        df = data.get(key)
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def clear_pdf_state():
+    """Clears PDF-related session state — called when user switches to Excel mode."""
+    for key in ["pdf_data", "detected_company"]:
+        if key in st.session_state:
+            del st.session_state[key]
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────
 # This must be the FIRST Streamlit command in the file
@@ -118,6 +167,7 @@ with st.sidebar:
     )
 
     if upload_type == "Excel (.xlsx)":
+        clear_pdf_state()  # Clear any old PDF data when switching to Excel
         uploaded_file = st.file_uploader(
             "Upload Excel file (.xlsx)",
             type=["xlsx"],
@@ -246,13 +296,30 @@ if data is None:
 # Calculate all metrics once data is loaded
 financials = data.get("financials", {})
 balance    = data.get("balance", {})
-ratios     = calculate_all_ratios(financials, balance)
-ratio_trends = calculate_ratio_trends(
-    data.get("income_statement", {}),
-    data.get("balance_sheet", {})
-) if "income_statement" in data and "balance_sheet" in data else {}
-rs_data    = analyze_revenue_schedule(data.get("revenue_schedule"))
-bva_data   = analyze_budget_vs_actuals(data.get("budget_vs_actuals"))
+
+# Safely calculate all metrics — each wrapped so one failure doesn't crash the app
+try:
+    ratios = calculate_all_ratios(financials, balance)
+except Exception:
+    ratios = {}
+
+try:
+    ratio_trends = calculate_ratio_trends(
+        data.get("income_statement", pd.DataFrame()),
+        data.get("balance_sheet", pd.DataFrame())
+    ) if "income_statement" in data and "balance_sheet" in data else {}
+except Exception:
+    ratio_trends = {}
+
+try:
+    rs_data = analyze_revenue_schedule(data.get("revenue_schedule"))
+except Exception:
+    rs_data = None
+
+try:
+    bva_data = analyze_budget_vs_actuals(data.get("budget_vs_actuals"))
+except Exception:
+    bva_data = None
 
 latest_year = financials.get("latest_year", "FY2024")
 
@@ -373,15 +440,17 @@ with tab1:
                 )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    # Revenue trend chart
+    # Revenue trend chart — only show if we have at least 2 years of data
     st.markdown("#### Revenue & Net Income Trend")
     if "income_statement" in data:
         df = data["income_statement"]
         year_cols = [c for c in df.columns if str(c).startswith("FY")]
+        # Only show years with actual revenue data
+        year_cols = [y for y in year_cols if df[df["Line Item"] == "Revenue"][y].values[0] != 0] if not df[df["Line Item"] == "Revenue"].empty else []
         rev_row = df[df["Line Item"] == "Revenue"]
         ni_row  = df[df["Line Item"] == "Net Income"]
 
-        if not rev_row.empty and not ni_row.empty:
+        if not rev_row.empty and not ni_row.empty and len(year_cols) >= 1:
             fig = go.Figure()
             fig.add_trace(go.Bar(
                 x=year_cols,

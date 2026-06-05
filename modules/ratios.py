@@ -15,15 +15,40 @@ def calculate_all_ratios(financials: dict, balance: dict) -> dict:
       - benchmark:   what a healthy number looks like
       - status:      "good", "warning", or "poor" based on benchmark
     """
+    # Ensure we always have dicts, never None
+    if not financials:
+        financials = {}
+    if not balance:
+        balance = {}
+
+    # Fill missing keys with 0 so ratio functions never crash on KeyError
+    required_financial_keys = [
+        "revenue", "revenue_prior", "gross_profit", "ebitda", "ebit",
+        "interest_expense", "net_income", "net_income_prior", "cogs", "da"
+    ]
+    required_balance_keys = [
+        "cash", "current_assets", "current_liabilities", "inventory",
+        "total_assets", "total_assets_prior", "accounts_receivable",
+        "accounts_payable", "short_term_debt", "long_term_debt",
+        "total_liabilities", "shareholders_equity", "shareholders_equity_prior"
+    ]
+    for k in required_financial_keys:
+        financials.setdefault(k, 0)
+    for k in required_balance_keys:
+        balance.setdefault(k, 0)
 
     ratios = {}
 
-    # Run all four ratio categories
-    ratios.update(liquidity_ratios(financials, balance))
-    ratios.update(profitability_ratios(financials, balance))
-    ratios.update(leverage_ratios(financials, balance))
-    ratios.update(efficiency_ratios(financials, balance))
-    ratios.update(growth_ratios(financials))
+    # Each category wrapped so one failure doesn't kill all ratios
+    for fn in [liquidity_ratios, profitability_ratios, leverage_ratios,
+               efficiency_ratios, growth_ratios]:
+        try:
+            if fn == growth_ratios:
+                ratios.update(fn(financials))
+            else:
+                ratios.update(fn(financials, balance))
+        except Exception:
+            pass  # Skip broken category silently
 
     return ratios
 
@@ -32,11 +57,14 @@ def calculate_all_ratios(financials: dict, balance: dict) -> dict:
 def safe_divide(numerator, denominator):
     """
     Divides two numbers safely.
-    Returns 0 if the denominator is 0 (avoids crashing on division by zero).
+    Returns 0 if the denominator is 0 or None (avoids crashing).
     """
-    if denominator == 0:
+    try:
+        if not denominator:
+            return 0
+        return numerator / denominator
+    except (TypeError, ZeroDivisionError):
         return 0
-    return numerator / denominator
 
 
 def rate_status(value, good_above=None, good_below=None, warn_above=None, warn_below=None):

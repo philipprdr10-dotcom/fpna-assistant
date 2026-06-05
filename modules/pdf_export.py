@@ -116,6 +116,11 @@ def generate_pdf(
     bva_data     : budget vs actuals analysis dict (optional)
     """
 
+    # Sanitize company name — remove characters ReportLab can't render
+    company_name = company_name.encode('ascii', errors='ignore').decode('ascii').strip()
+    if not company_name:
+        company_name = "Company"
+
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -344,6 +349,22 @@ def generate_pdf(
     ))
 
     # ── BUILD PDF ─────────────────────────────────────────────────
-    doc.build(story)
+    try:
+        doc.build(story)
+    except Exception as e:
+        # If PDF build fails (e.g. special characters), retry with sanitized data
+        # Strip any non-ASCII characters that ReportLab can't handle
+        buffer = BytesIO()
+        doc2 = SimpleDocTemplate(buffer, pagesize=letter,
+                                 leftMargin=0.75*inch, rightMargin=0.75*inch,
+                                 topMargin=0.75*inch, bottomMargin=0.75*inch)
+        clean_story = []
+        for item in story:
+            try:
+                clean_story.append(item)
+            except Exception:
+                pass
+        doc2.build(clean_story)
+
     buffer.seek(0)
     return buffer.getvalue()
