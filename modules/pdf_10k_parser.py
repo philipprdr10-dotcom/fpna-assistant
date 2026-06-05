@@ -37,13 +37,59 @@ BALANCE_MARKERS = [
 # ── STEP 1: EXTRACT TEXT FROM ALL PAGES ──────────────────────────────────────
 
 def extract_all_pages(file) -> list:
-    """Extract (page_num, text) for every page in the PDF."""
+    """
+    Extract (page_num, text) for every page in the PDF.
+    Handles: password-protected files, corrupt pages, encoding issues.
+    Raises clear errors for scanned PDFs and files that are too large.
+    """
     pages = []
-    with pdfplumber.open(file) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if text and len(text.strip()) > 30:
-                pages.append((i + 1, text.strip()))
+    try:
+        with pdfplumber.open(file) as pdf:
+            total_pages = len(pdf.pages)
+
+            # Warn if PDF is very large — Streamlit Cloud has a 30s limit
+            if total_pages > 200:
+                raise ValueError(
+                    f"This PDF has {total_pages} pages — too large to process. "
+                    "Try downloading just the financial statements section."
+                )
+
+            for i, page in enumerate(pdf.pages):
+                try:
+                    text = page.extract_text()
+                    if text and len(text.strip()) > 30:
+                        # Clean up encoding artifacts
+                        text = text.encode('utf-8', errors='ignore').decode('utf-8')
+                        pages.append((i + 1, text.strip()))
+                except Exception:
+                    continue  # Skip corrupt pages silently
+
+    except ValueError:
+        raise  # Re-raise our custom errors
+    except Exception as e:
+        if "password" in str(e).lower():
+            raise ValueError("This PDF is password-protected. Please remove the password and try again.")
+        raise ValueError(f"Could not open PDF: {e}")
+
+    if not pages:
+        raise ValueError(
+            "No text could be extracted from this PDF. "
+            "It may be a scanned image. Try downloading the 10-K directly from SEC EDGAR "
+            "(sec.gov) which always provides text-based PDFs."
+        )
+
+    # Check if it looks like a 10-K at all
+    full_sample = " ".join([t for _, t in pages[:5]]).upper()
+    is_annual_report = any(k in full_sample for k in [
+        "ANNUAL REPORT", "FORM 10-K", "FISCAL YEAR", "FINANCIAL STATEMENTS",
+        "ITEM 1", "PART I", "SEC"
+    ])
+    if not is_annual_report:
+        raise ValueError(
+            "This doesn't look like a 10-K annual report. "
+            "Please upload an annual report (Form 10-K) from SEC EDGAR."
+        )
+
     return pages
 
 
@@ -177,11 +223,28 @@ FINANCIAL STATEMENTS TEXT:
     )
 
     raw = message.content[0].text.strip()
+    # Strip markdown fences if Claude added them
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*',     '', raw)
     raw = re.sub(r'\s*```$',     '', raw)
+    raw = raw.strip()
 
-    return json.loads(raw)
+    # Try to parse JSON — if it fails, attempt repair
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Common Claude JSON issues: trailing commas, missing quotes
+        # Try to extract just the JSON object
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except Exception:
+                pass
+        raise ValueError(
+            "Claude returned an unexpected response format. "
+            "Please try again — this occasionally happens with complex PDFs."
+        )
 
 
 # ── STEP 5: FORMAT FOR DASHBOARD ─────────────────────────────────────────────
@@ -275,15 +338,55 @@ def format_for_dashboard(extracted: dict, financial_text: str) -> dict:
     }
 
 
+# ── RESULT VALIDATOR ─────────────────────────────────────────────────────────
+
+def validate_extraction(extracted: dict) -> tuple:
+    """
+    Checks if Claude's extraction looks reasonable.
+    Returns (is_valid, reason) tuple.
+    """
+    inc = extracted.get("income_statement", {})
+    bal = extracted.get("balance_sheet", {})
+
+    revenue      = inc.get("revenue", 0)
+    total_assets = bal.get("total_assets", 0)
+    net_income   = inc.get("net_income", 0)
+
+    # All zeros = extraction failed
+    all_values = list(inc.values()) + list(bal.values())
+    non_zero = [v for v in all_values if isinstance(v, (int, float)) and v != 0]
+    if len(non_zero) < 3:
+        return False, "Too many zeros — financial statements not found in the text sent to Claude."
+
+    # Sanity check: revenue should be positive
+    if revenue < 0:
+        return False, f"Revenue is negative ({revenue}) — something went wrong with number extraction."
+
+    # Sanity check: if revenue exists, total assets should too
+    if revenue > 0 and total_assets == 0:
+        return False, "Revenue found but balance sheet is empty — try again."
+
+    # Check for unit conversion issues (numbers suspiciously small for a public company)
+    # Public companies have at least $1M in revenue
+    if 0 < revenue < 100000:
+        return False, (
+            f"Revenue of ${revenue:,.0f} looks too small — "
+            "the PDF may report in millions but conversion was missed."
+        )
+
+    return True, "OK"
+
+
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
 def parse_10k_pdf(file, company_name: str = "the company") -> dict:
-    """Full pipeline: PDF → financial pages → Claude → dashboard dict."""
+    """
+    Full pipeline: PDF → financial pages → Claude → dashboard dict.
+    Includes automatic retry if first attempt returns zeros.
+    """
 
     # Step 1: Extract all pages
     all_pages = extract_all_pages(file)
-    if not all_pages:
-        raise ValueError("No text could be extracted. This PDF may be a scanned image.")
 
     # Step 2: Find financial statement pages
     fin_pages = find_financial_pages(all_pages)
@@ -297,5 +400,31 @@ def parse_10k_pdf(file, company_name: str = "the company") -> dict:
     # Step 4: Claude extracts the numbers
     extracted = extract_with_claude(financial_text, company_name)
 
-    # Step 5: Format for dashboard
-    return format_for_dashboard(extracted, financial_text)
+    # Step 5: Validate — if zeros, retry with broader text
+    is_valid, reason = validate_extraction(extracted)
+
+    if not is_valid:
+        # Retry: send a larger chunk from later in the document
+        mid = len(all_pages) // 2
+        retry_text = "\n\n".join([t for _, t in all_pages[mid:]])[:14000]
+
+        if retry_text != financial_text:
+            extracted = extract_with_claude(retry_text, company_name)
+            is_valid, reason = validate_extraction(extracted)
+            financial_text = retry_text  # update debug text
+
+        if not is_valid:
+            # One more retry: last 30% of document
+            last_text = "\n\n".join([t for _, t in all_pages[int(len(all_pages)*0.7):]])[:14000]
+            extracted = extract_with_claude(last_text, company_name)
+            is_valid, reason = validate_extraction(extracted)
+            financial_text = last_text
+
+    # Step 6: Format for dashboard
+    result = format_for_dashboard(extracted, financial_text)
+
+    # Add validation warning if still failing
+    if not is_valid:
+        result["_validation_warning"] = reason
+
+    return result

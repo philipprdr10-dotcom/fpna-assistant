@@ -176,7 +176,10 @@ if uploaded_pdf is not None and parse_pdf_button:
         with st.sidebar:
             with st.spinner("Claude is reading your 10-K... (20-40 seconds)"):
                 data = parse_10k_pdf(uploaded_pdf, company_name)
-        st.sidebar.success("✅ 10-K parsed successfully!")
+        if data.get("_validation_warning"):
+            st.sidebar.warning(f"⚠️ {data['_validation_warning']}")
+        else:
+            st.sidebar.success("✅ 10-K parsed successfully!")
 
         # Debug panel — shows what Claude extracted
         with st.expander("🔍 Debug: Raw data extracted from PDF", expanded=True):
