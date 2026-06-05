@@ -181,14 +181,6 @@ if uploaded_pdf is not None and parse_pdf_button:
         else:
             st.sidebar.success("✅ 10-K parsed successfully!")
 
-        # Debug panel — shows what Claude extracted
-        with st.expander("🔍 Debug: Raw data extracted from PDF", expanded=True):
-            if data and "extracted_json" in data:
-                st.markdown("**Claude's extracted numbers:**")
-                st.json(data["extracted_json"])
-            if data and "_debug_sections" in data:
-                st.markdown("**Text sent to Claude (first 3000 chars):**")
-                st.text(data["_debug_sections"].get("financial_text_sent", "")[:3000])
     except Exception as e:
         st.sidebar.error(f"❌ Error parsing PDF: {e}")
         st.error(f"Full error: {e}")
@@ -335,6 +327,8 @@ with tab1:
         if "income_statement" in data:
             df = data["income_statement"]
             year_cols = [c for c in df.columns if str(c).startswith("FY")]
+            # Only show year columns that have at least one non-zero value
+            year_cols = [c for c in year_cols if df[c].apply(lambda x: pd.notna(x) and x != 0).any()]
             display_df = df[["Line Item"] + year_cols].copy()
             for col in year_cols:
                 display_df[col] = display_df[col].apply(
@@ -347,6 +341,8 @@ with tab1:
         if "balance_sheet" in data:
             df = data["balance_sheet"]
             year_cols = [c for c in df.columns if str(c).startswith("FY")]
+            # Only show year columns that have at least one non-zero value
+            year_cols = [c for c in year_cols if df[c].apply(lambda x: pd.notna(x) and x != 0).any()]
             display_df = df[["Line Item"] + year_cols].copy()
             for col in year_cols:
                 display_df[col] = display_df[col].apply(
