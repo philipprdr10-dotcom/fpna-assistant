@@ -251,6 +251,12 @@ bva_data   = analyze_budget_vs_actuals(data.get("budget_vs_actuals"))
 
 latest_year = financials.get("latest_year", "FY2024")
 
+# Use detected company name from PDF if available
+if data.get("_detected_company_name"):
+    company_name = data["_detected_company_name"]
+elif st.session_state.get("pdf_data") and st.session_state["pdf_data"].get("_detected_company_name"):
+    company_name = st.session_state["pdf_data"]["_detected_company_name"]
+
 # ── SMART NUMBER FORMATTER ────────────────────────────────────────
 # Automatically picks B, M, or K depending on the size of the number
 def fmt_value(val):
