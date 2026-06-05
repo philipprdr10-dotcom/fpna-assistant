@@ -189,8 +189,10 @@ with st.sidebar:
         )
         uploaded_file = None
 
-    # Option to use sample data
-    use_sample = st.checkbox("Use sample data", value=True if (not uploaded_file and not uploaded_pdf) else False)
+    # Option to use sample data — default True, user can uncheck
+    if "use_sample_state" not in st.session_state:
+        st.session_state["use_sample_state"] = True
+    use_sample = st.checkbox("Use sample data", key="use_sample_state")
 
     st.markdown("---")
     st.markdown("### Compare a Second Company")
